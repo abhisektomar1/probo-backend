@@ -4,7 +4,6 @@ import { INR_BALANCES, createUser } from '../dataStore.js'; // Import shared sta
 
 const  router = express.Router();
 
-// Create User
 router.post('/create/:userId', (req, res) => {
     const { userId } = req.params;
     createUser(userId);
@@ -13,4 +12,4 @@ router.post('/create/:userId', (req, res) => {
 
 
 
-export default router; // Export the router
+export default router; 

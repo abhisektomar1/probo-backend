@@ -16,16 +16,14 @@ export function createSymbol(stockSymbol) {
 }
 
 export function createStockBalance(userId, stockSymbol) {
-    // Check if the user has a stock balance entry
     if (!STOCK_BALANCES[userId]) {
       STOCK_BALANCES[userId] = {};
     }
   
-    // Check if the stock symbol entry exists for the user
     if (!STOCK_BALANCES[userId][stockSymbol]) {
       STOCK_BALANCES[userId][stockSymbol] = {
-        yes: { quantity: 0, locked: 0 }, // Initialize 'yes' with object
-        no: { quantity: 0, locked: 0 },  // Initialize 'no' with object
+        yes: { quantity: 0, locked: 0 }, 
+        no: { quantity: 0, locked: 0 }, 
       };
     }
   }
