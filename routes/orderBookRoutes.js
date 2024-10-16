@@ -1,6 +1,5 @@
 import express from "express";
-import {  INR_BALANCES, ORDERBOOK, STOCK_BALANCES } from "../dataStore.js";
-import { app } from "../index.js";
+import { INR_BALANCES, ORDERBOOK, STOCK_BALANCES } from "../dataStore.js";
 const router = express.Router();
 
 router.post("/sell", (req, res) => {
@@ -22,7 +21,7 @@ router.post("/sell", (req, res) => {
 
   if (userStock.quantity < quantity) {
     return res.status(400).json({
-      message: `Insufficient stock balance`,
+      message: "Insufficient stock balance",
     });
   }
 
@@ -47,11 +46,9 @@ router.post("/sell", (req, res) => {
   orderbookEntry.orders[userId] += quantity;
 
   res.status(200).json({
-    message: `Sell order placed for ${quantity} '${stockType}' options at price ${price}.`,
+    message: `Sell order placed and pending`,
   });
 });
-
-
 
 router.post("/buy", (req, res) => {
   const { userId, stockSymbol, quantity, price, stockType } = req.body;
@@ -61,6 +58,10 @@ router.post("/buy", (req, res) => {
   if (INR_BALANCES[userId].balance < totalCost) {
     return res.status(400).json({ message: "Insufficient INR balance" });
   }
+
+  // Lock the funds
+  INR_BALANCES[userId].balance -= totalCost;
+  INR_BALANCES[userId].locked += totalCost;
 
   // Get the current orders for the given stock type ('yes' or 'no')
   const stockOrderBook = ORDERBOOK[stockSymbol][stockType];
@@ -89,11 +90,9 @@ router.post("/buy", (req, res) => {
         totalMatchedCost += sellQuantity * sellPrice;
         matchedOrders.push({ sellerId, quantity: sellQuantity, price: sellPrice });
 
-        // Update seller's stock balance, release locked stock and update INR balances
-        STOCK_BALANCES[sellerId][stockSymbol][stockType].quantity += sellQuantity; // Release to seller
+        // Update seller's stock balance and remove the order
         STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= sellQuantity;
-        INR_BALANCES[sellerId].balance += sellQuantity * sellPrice; // Release INR back to seller
-
+        INR_BALANCES[sellerId].balance += sellQuantity * sellPrice;
         delete sellOrders.orders[sellerId];
       } else {
         // Partially match this sell order
@@ -102,8 +101,8 @@ router.post("/buy", (req, res) => {
 
         // Update the sell order to reflect the remaining quantity
         sellOrders.orders[sellerId] -= remainingQuantity;
-        STOCK_BALANCES[sellerId][stockSymbol][stockType].quantity += remainingQuantity; // Release locked tokens
         STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= remainingQuantity;
+        INR_BALANCES[sellerId].balance += remainingQuantity * sellPrice;
 
         remainingQuantity = 0;
         break;
@@ -121,7 +120,9 @@ router.post("/buy", (req, res) => {
   }
 
   // Update the buyer's balance and stock holdings after matching
-  INR_BALANCES[userId].balance -= totalMatchedCost; // Deduct the matched amount
+  INR_BALANCES[userId].locked -= totalMatchedCost; // Release the matched amount
+  if (!STOCK_BALANCES[userId]) STOCK_BALANCES[userId] = {};
+  if (!STOCK_BALANCES[userId][stockSymbol]) STOCK_BALANCES[userId][stockSymbol] = { yes: { quantity: 0, locked: 0 }, no: { quantity: 0, locked: 0 } };
   STOCK_BALANCES[userId][stockSymbol][stockType].quantity += (quantity - remainingQuantity); // Add matched quantity to buyer
 
   if (remainingQuantity > 0) {
@@ -130,28 +131,67 @@ router.post("/buy", (req, res) => {
       stockOrderBook[price] = { total: 0, orders: {} };
     }
     stockOrderBook[price].total += remainingQuantity;
-    stockOrderBook[price].orders[userId] = remainingQuantity;
+    stockOrderBook[price].orders[userId] = (stockOrderBook[price].orders[userId] || 0) + remainingQuantity;
 
-    // Lock the buyer's INR balance for the remaining quantity
-    INR_BALANCES[userId].locked += remainingQuantity * price;
+    // Create a corresponding 'no' sell order if buying 'yes' below market price
+    if (stockType === 'yes' && price < Math.min(...sortedSellPrices)) {
+      const noOrderBook = ORDERBOOK[stockSymbol]['no'];
+      if (!noOrderBook[price]) {
+        noOrderBook[price] = { total: 0, orders: {} };
+      }
+      noOrderBook[price].total += remainingQuantity;
+      noOrderBook[price].orders[userId] = (noOrderBook[price].orders[userId] || 0) + remainingQuantity;
+    }
 
     return res.status(200).json({
-      message: `Buy order placed and pending`,
+      message: "Buy order placed and pending",
     });
   } else if (quantity > remainingQuantity) {
     // Partial match occurred
+    INR_BALANCES[userId].balance += (totalCost - totalMatchedCost); // Refund unused INR
     return res.status(200).json({
       message: `Buy order matched partially, ${remainingQuantity} remaining`,
     });
   } else {
     // Fully matched
+    INR_BALANCES[userId].balance += (totalCost - totalMatchedCost); // Refund unused INR
     return res.status(200).json({
       message: `Buy order matched at best price ${price}`,
     });
   }
 });
 
-  
-  
+router.post("/cancel", (req, res) => {
+  const { userId, stockSymbol, quantity, price, stockType } = req.body;
+
+  if (!ORDERBOOK[stockSymbol] || !ORDERBOOK[stockSymbol][stockType][price]) {
+    return res.status(404).json({ message: "Order not found" });
+  }
+
+  const ordersAtPrice = ORDERBOOK[stockSymbol][stockType][price];
+  if (!ordersAtPrice.orders[userId] || ordersAtPrice.orders[userId] < quantity) {
+    return res.status(400).json({ message: "Insufficient quantity to cancel" });
+  }
+
+  // Update order book
+  ordersAtPrice.orders[userId] -= quantity;
+  ordersAtPrice.total -= quantity;
+
+  if (ordersAtPrice.orders[userId] === 0) {
+    delete ordersAtPrice.orders[userId];
+  }
+
+  if (ordersAtPrice.total === 0) {
+    delete ORDERBOOK[stockSymbol][stockType][price];
+  }
+
+  // Update user's balances
+  if (stockType === 'yes' || stockType === 'no') {
+    STOCK_BALANCES[userId][stockSymbol][stockType].locked -= quantity;
+    STOCK_BALANCES[userId][stockSymbol][stockType].quantity += quantity;
+  }
+
+  res.status(200).json({ message: `${stockType} order canceled` });
+});
 
 export default router;

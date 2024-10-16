@@ -304,15 +304,15 @@ describe("E-to-E-5", () => {
       });
   
       // Step 7: User2 places a buy order for 100 tokens, should match the lower price first (1400)
-      // response = await request(app).post("/order/buy").send({
-      //   userId: "user2",
-      //   stockSymbol: "ETH_USD_15_Oct_2024_12_00",
-      //   quantity: 100,
-      //   price: 1500,
-      //   stockType: "yes",
-      // });
-      // expect(response.status).toBe(200);
-      // expect(response.body.message).toBe("Buy order matched at best price 1400");
+      response = await request(app).post("/order/buy").send({
+        userId: "user2",
+        stockSymbol: "ETH_USD_15_Oct_2024_12_00",
+        quantity: 100,
+        price: 1500,
+        stockType: "yes",
+      });
+      expect(response.status).toBe(200);
+      expect(response.body.message).toBe("Buy order matched at best price 1400");
   
     //   // Check INR balances after matching the order
     //   response = await request(app).get("/balances/inr");
