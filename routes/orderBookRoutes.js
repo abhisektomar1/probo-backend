@@ -1,5 +1,6 @@
 import express from "express";
-import { createStockBalance, INR_BALANCES, ORDERBOOK, STOCK_BALANCES } from "../dataStore.js";
+import {  INR_BALANCES, ORDERBOOK, STOCK_BALANCES } from "../dataStore.js";
+import { app } from "../index.js";
 const router = express.Router();
 
 router.post("/sell", (req, res) => {
@@ -21,7 +22,7 @@ router.post("/sell", (req, res) => {
 
   if (userStock.quantity < quantity) {
     return res.status(400).json({
-      message: `Insufficient ${stockType} stock. You have ${userStock.quantity} but are trying to sell ${quantity}.`,
+      message: `Insufficient stock balance`,
     });
   }
 
@@ -50,77 +51,107 @@ router.post("/sell", (req, res) => {
   });
 });
 
+
+
 router.post("/buy", (req, res) => {
   const { userId, stockSymbol, quantity, price, stockType } = req.body;
 
-  if (!INR_BALANCES[userId]) {
-    return res.status(404).json({ message: `User ${userId} not found` });
-  }
-
-  if (!ORDERBOOK[stockSymbol] || !ORDERBOOK[stockSymbol][stockType][price]) {
-    return res
-      .status(400)
-      .json({
-        message: `No sell orders available at this price for ${stockType} options`,
-      });
-  }
-
-  const availableSellOrders = ORDERBOOK[stockSymbol][stockType][price];
-  let totalCost = quantity * price;
-
+  // Ensure the user has sufficient funds for the total buy
+  const totalCost = quantity * price;
   if (INR_BALANCES[userId].balance < totalCost) {
-    return res.status(400).json({
-      message: `Insufficient balance. You need ${totalCost} but only have ${INR_BALANCES[userId].balance}`,
-    });
+    return res.status(400).json({ message: "Insufficient INR balance" });
   }
 
-  let remainingQuantity = quantity;
+  // Get the current orders for the given stock type ('yes' or 'no')
+  const stockOrderBook = ORDERBOOK[stockSymbol][stockType];
 
-  for (const sellerId in availableSellOrders.orders) {
-    const sellerQuantity = availableSellOrders.orders[sellerId];
+  let remainingQuantity = quantity; // Track the remaining quantity to be matched
+  let totalMatchedCost = 0; // Total cost of the matched orders
+  let matchedOrders = [];
 
-    if (sellerQuantity >= remainingQuantity) {
-      availableSellOrders.orders[sellerId] -= remainingQuantity;
+  // Try to match with the lowest sell orders (best price for buyer)
+  const sortedSellPrices = Object.keys(stockOrderBook).map(Number).sort((a, b) => a - b);
 
-      if (availableSellOrders.orders[sellerId] === 0) {
-        delete availableSellOrders.orders[sellerId];
+  for (const sellPrice of sortedSellPrices) {
+    if (sellPrice > price || remainingQuantity === 0) {
+      break; // No more matching, either sell price is higher than our buy price or we're done
+    }
+
+    const sellOrders = stockOrderBook[sellPrice];
+
+    // For each sell order at this price, try to match as much as possible
+    for (const sellerId in sellOrders.orders) {
+      const sellQuantity = sellOrders.orders[sellerId];
+
+      if (sellQuantity <= remainingQuantity) {
+        // Fully match this sell order
+        remainingQuantity -= sellQuantity;
+        totalMatchedCost += sellQuantity * sellPrice;
+        matchedOrders.push({ sellerId, quantity: sellQuantity, price: sellPrice });
+
+        // Update seller's stock balance, release locked stock and update INR balances
+        STOCK_BALANCES[sellerId][stockSymbol][stockType].quantity += sellQuantity; // Release to seller
+        STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= sellQuantity;
+        INR_BALANCES[sellerId].balance += sellQuantity * sellPrice; // Release INR back to seller
+
+        delete sellOrders.orders[sellerId];
+      } else {
+        // Partially match this sell order
+        totalMatchedCost += remainingQuantity * sellPrice;
+        matchedOrders.push({ sellerId, quantity: remainingQuantity, price: sellPrice });
+
+        // Update the sell order to reflect the remaining quantity
+        sellOrders.orders[sellerId] -= remainingQuantity;
+        STOCK_BALANCES[sellerId][stockSymbol][stockType].quantity += remainingQuantity; // Release locked tokens
+        STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= remainingQuantity;
+
+        remainingQuantity = 0;
+        break;
       }
+    }
 
-      availableSellOrders.total -= remainingQuantity;
+    // Remove the price level from the order book if all orders are matched
+    if (Object.keys(sellOrders.orders).length === 0) {
+      delete stockOrderBook[sellPrice];
+    }
 
-      INR_BALANCES[userId].balance -= remainingQuantity * price;
-      INR_BALANCES[sellerId].balance += remainingQuantity * price;
-
-      createStockBalance(userId, stockSymbol);
-      STOCK_BALANCES[userId][stockSymbol][stockType].quantity +=
-        remainingQuantity;
-
-      STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -=
-        remainingQuantity;
-
-      return res.status(200).json({
-        message: "Buy order placed and trade executed",
-      });
-    } else {
-      remainingQuantity -= sellerQuantity;
-
-      INR_BALANCES[userId].balance -= sellerQuantity * price;
-      INR_BALANCES[sellerId].balance += sellerQuantity * price;
-
-      createStockBalance(userId, stockSymbol);
-      STOCK_BALANCES[userId][stockSymbol][stockType].quantity += sellerQuantity;
-
-      STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= sellerQuantity;
-
-      delete availableSellOrders.orders[sellerId];
+    if (remainingQuantity === 0) {
+      break; // Stop if all the buy order has been matched
     }
   }
 
+  // Update the buyer's balance and stock holdings after matching
+  INR_BALANCES[userId].balance -= totalMatchedCost; // Deduct the matched amount
+  STOCK_BALANCES[userId][stockSymbol][stockType].quantity += (quantity - remainingQuantity); // Add matched quantity to buyer
+
   if (remainingQuantity > 0) {
-    return res.status(400).json({
-      message: `Only partial order filled, ${remainingQuantity} still pending`,
+    // If there is still some quantity left, add it to the order book as a pending order
+    if (!stockOrderBook[price]) {
+      stockOrderBook[price] = { total: 0, orders: {} };
+    }
+    stockOrderBook[price].total += remainingQuantity;
+    stockOrderBook[price].orders[userId] = remainingQuantity;
+
+    // Lock the buyer's INR balance for the remaining quantity
+    INR_BALANCES[userId].locked += remainingQuantity * price;
+
+    return res.status(200).json({
+      message: `Buy order placed and pending`,
+    });
+  } else if (quantity > remainingQuantity) {
+    // Partial match occurred
+    return res.status(200).json({
+      message: `Buy order matched partially, ${remainingQuantity} remaining`,
+    });
+  } else {
+    // Fully matched
+    return res.status(200).json({
+      message: `Buy order matched at best price ${price}`,
     });
   }
 });
+
+  
+  
 
 export default router;

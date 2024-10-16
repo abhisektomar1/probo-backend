@@ -12,7 +12,7 @@ router.post("/mint", (req, res) => {
       return res.status(404).json({ message: `User ${userId} not found` });
     }
   
-    const totalCost = quantity * price * 2; 
+    const totalCost = quantity * price; 
     const userBalance = INR_BALANCES[userId].balance;
   
     if (userBalance < totalCost) {
