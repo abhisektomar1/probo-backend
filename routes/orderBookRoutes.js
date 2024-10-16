@@ -69,6 +69,7 @@ router.post("/buy", (req, res) => {
   let remainingQuantity = quantity; // Track the remaining quantity to be matched
   let totalMatchedCost = 0; // Total cost of the matched orders
   let matchedOrders = [];
+  let bestMatchedPrice = Infinity;
 
   // Try to match with the lowest sell orders (best price for buyer)
   const sortedSellPrices = Object.keys(stockOrderBook).map(Number).sort((a, b) => a - b);
@@ -94,6 +95,8 @@ router.post("/buy", (req, res) => {
         STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= sellQuantity;
         INR_BALANCES[sellerId].balance += sellQuantity * sellPrice;
         delete sellOrders.orders[sellerId];
+
+        bestMatchedPrice = Math.min(bestMatchedPrice, sellPrice);
       } else {
         // Partially match this sell order
         totalMatchedCost += remainingQuantity * sellPrice;
@@ -104,6 +107,7 @@ router.post("/buy", (req, res) => {
         STOCK_BALANCES[sellerId][stockSymbol][stockType].locked -= remainingQuantity;
         INR_BALANCES[sellerId].balance += remainingQuantity * sellPrice;
 
+        bestMatchedPrice = Math.min(bestMatchedPrice, sellPrice);
         remainingQuantity = 0;
         break;
       }
@@ -120,7 +124,8 @@ router.post("/buy", (req, res) => {
   }
 
   // Update the buyer's balance and stock holdings after matching
-  INR_BALANCES[userId].locked -= totalMatchedCost; // Release the matched amount
+  INR_BALANCES[userId].locked -= totalCost; // Release all initially locked funds
+  INR_BALANCES[userId].balance += (totalCost - totalMatchedCost); // Refund unused INR
   if (!STOCK_BALANCES[userId]) STOCK_BALANCES[userId] = {};
   if (!STOCK_BALANCES[userId][stockSymbol]) STOCK_BALANCES[userId][stockSymbol] = { yes: { quantity: 0, locked: 0 }, no: { quantity: 0, locked: 0 } };
   STOCK_BALANCES[userId][stockSymbol][stockType].quantity += (quantity - remainingQuantity); // Add matched quantity to buyer
@@ -132,6 +137,11 @@ router.post("/buy", (req, res) => {
     }
     stockOrderBook[price].total += remainingQuantity;
     stockOrderBook[price].orders[userId] = (stockOrderBook[price].orders[userId] || 0) + remainingQuantity;
+
+    // Lock the funds for the remaining quantity
+    const remainingCost = remainingQuantity * price;
+    INR_BALANCES[userId].balance -= remainingCost;
+    INR_BALANCES[userId].locked += remainingCost;
 
     // Create a corresponding 'no' sell order if buying 'yes' below market price
     if (stockType === 'yes' && price < Math.min(...sortedSellPrices)) {
@@ -146,21 +156,13 @@ router.post("/buy", (req, res) => {
     return res.status(200).json({
       message: "Buy order placed and pending",
     });
-  } else if (quantity > remainingQuantity) {
-    // Partial match occurred
-    INR_BALANCES[userId].balance += (totalCost - totalMatchedCost); // Refund unused INR
-    return res.status(200).json({
-      message: `Buy order matched partially, ${remainingQuantity} remaining`,
-    });
   } else {
     // Fully matched
-    INR_BALANCES[userId].balance += (totalCost - totalMatchedCost); // Refund unused INR
     return res.status(200).json({
-      message: `Buy order matched at best price ${price}`,
+      message: `Buy order matched at best price ${bestMatchedPrice}`,
     });
   }
 });
-
 router.post("/cancel", (req, res) => {
   const { userId, stockSymbol, quantity, price, stockType } = req.body;
 
